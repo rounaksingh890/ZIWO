@@ -1,0 +1,1483 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Ziwo to HubSpot — CRM telephony integration</title>
+<meta name="description" content="I wire Ziwo cloud telephony into HubSpot. Click-to-call, screen pops, and calls that log themselves with disposition and recording. Four builds live." />
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700;800;900&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+
+<script type="importmap">
+{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.165.0/build/three.module.js" } }
+</script>
+
+<style>
+/* ============================================================
+   TOKENS — industrial / blueprint, light
+   ============================================================ */
+:root{
+  --paper:#E7ECEF;        /* cool blueprint paper            */
+  --paper-2:#EFF3F5;      /* raised panels                   */
+  --ink:#10242F;          /* deep slate ink, text + lines    */
+  --ink-soft:#3A535F;     /* secondary text                  */
+  --blue:#2C6E8F;         /* technical cyan, diagram lines   */
+  --blue-soft:#6E97A8;    /* muted blue labels               */
+  --signal:#E8651F;       /* THE accent: live call / wave    */
+  --signal-deep:#C2521A;
+  --ok:#2E7D63;           /* tiny "synced" status only       */
+  --faint:#C6D2D9;        /* hairlines / grid                */
+  --faint-2:#D7E0E5;
+  --grid: rgba(44,110,143,.10);
+  --shadow: 0 1px 0 rgba(16,36,47,.04), 0 12px 30px -18px rgba(16,36,47,.45);
+
+  --fdisp:"Archivo", system-ui, sans-serif;
+  --fbody:"IBM Plex Sans", system-ui, sans-serif;
+  --fmono:"IBM Plex Mono", ui-monospace, monospace;
+
+  --maxw: 1180px;
+  --pad: clamp(20px, 5vw, 64px);
+}
+
+*{box-sizing:border-box}
+html{scroll-behavior:smooth; -webkit-text-size-adjust:100%}
+body{
+  margin:0; background:var(--paper); color:var(--ink);
+  font-family:var(--fbody); font-size:16px; line-height:1.6;
+  overflow-x:hidden; cursor:auto;
+  background-image:
+    linear-gradient(var(--grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+  background-size: 28px 28px, 28px 28px;
+}
+@media (hover:hover){ body{cursor:none} }
+
+/* 3D + overlays --------------------------------------------- */
+#scene{position:fixed; inset:0; width:100vw; height:100vh; z-index:1; pointer-events:none}
+#grain{position:fixed; inset:0; z-index:2; pointer-events:none; opacity:.5; mix-blend-mode:multiply;
+  background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='140' height='140'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix type='saturate' values='0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)' opacity='0.55'/></svg>");}
+
+/* custom cursor --------------------------------------------- */
+.cursor,.cursor-dot{position:fixed; top:0; left:0; z-index:90; pointer-events:none; border-radius:50%;
+  mix-blend-mode:difference; will-change:transform; display:none}
+.cursor{width:26px; height:26px; border:1px solid #d9e3e8; margin:-13px 0 0 -13px;
+  transition:width .18s ease, height .18s ease, margin .18s ease, background .18s ease}
+.cursor-dot{width:4px; height:4px; background:#d9e3e8; margin:-2px 0 0 -2px}
+.cursor.is-hot{width:46px; height:46px; margin:-23px 0 0 -23px; background:rgba(232,101,31,.16); border-color:rgba(232,101,31,.7)}
+@media (hover:hover) and (pointer:fine){ .cursor,.cursor-dot{display:block} }
+
+/* ============================================================
+   LAYOUT PRIMITIVES
+   ============================================================ */
+.wrap{max-width:var(--maxw); margin:0 auto; padding:0 var(--pad); position:relative; z-index:3}
+section{position:relative; z-index:3}
+.eyebrow{font-family:var(--fmono); font-size:11.5px; letter-spacing:.22em; text-transform:uppercase;
+  color:var(--blue); display:flex; align-items:center; gap:10px}
+.eyebrow::before{content:""; width:26px; height:1px; background:var(--blue); display:inline-block; opacity:.7}
+.sect-head{display:flex; flex-direction:column; gap:14px; margin-bottom:34px; max-width:760px}
+.sect-head h2{font-family:var(--fdisp); font-weight:800; font-size:clamp(28px,4.4vw,46px);
+  line-height:1.02; letter-spacing:-.02em; margin:0}
+.sect-head p{margin:0; color:var(--ink-soft); font-size:clamp(15px,1.6vw,17px); max-width:620px}
+
+.reveal{opacity:0; transform:translateY(18px); transition:opacity .7s cubic-bezier(.2,.7,.2,1), transform .7s cubic-bezier(.2,.7,.2,1)}
+.reveal.in{opacity:1; transform:none}
+
+/* tag chips */
+.chip{font-family:var(--fmono); font-size:11px; letter-spacing:.04em; color:var(--ink-soft);
+  border:1px solid var(--faint); background:rgba(255,255,255,.4); padding:4px 9px; border-radius:2px; white-space:nowrap}
+.chip .dot{display:inline-block; width:6px; height:6px; border-radius:50%; background:var(--ok); margin-right:6px; vertical-align:middle}
+
+/* ============================================================
+   TITLE BLOCK (engineering drawing corner)
+   ============================================================ */
+.titleblock{position:fixed; top:0; left:0; right:0; z-index:40; pointer-events:none;
+  display:flex; justify-content:space-between; align-items:flex-start;
+  padding:14px var(--pad); mix-blend-mode:normal}
+.tb-mark{font-family:var(--fmono); font-size:11px; letter-spacing:.14em; color:var(--ink);
+  border:1px solid var(--faint); background:rgba(231,236,239,.82); backdrop-filter:blur(6px);
+  display:grid; grid-template-columns:auto auto; gap:2px 16px; padding:8px 12px; border-radius:2px; pointer-events:auto}
+.tb-mark b{font-weight:600}
+.tb-mark .k{color:var(--blue-soft)}
+.tb-right{font-family:var(--fmono); font-size:11px; letter-spacing:.14em; color:var(--ink-soft);
+  background:rgba(231,236,239,.82); backdrop-filter:blur(6px); border:1px solid var(--faint);
+  padding:8px 12px; border-radius:2px; pointer-events:auto; display:flex; gap:8px; align-items:center}
+.tb-right .live{display:inline-block; width:7px; height:7px; border-radius:50%; background:var(--signal);
+  box-shadow:0 0 0 0 rgba(232,101,31,.5); animation:pulse 2.4s infinite}
+@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(232,101,31,.45)}70%{box-shadow:0 0 0 8px rgba(232,101,31,0)}100%{box-shadow:0 0 0 0 rgba(232,101,31,0)}}
+
+/* ============================================================
+   HERO
+   ============================================================ */
+.hero{min-height:100svh; display:flex; flex-direction:column; justify-content:center;
+  padding-top:104px; padding-bottom:48px}
+.hero .eyebrow{margin-bottom:26px}
+.hero h1{font-family:var(--fdisp); font-weight:900; letter-spacing:-.035em; line-height:.96;
+  font-size:clamp(38px,7.4vw,92px); margin:0 0 4px; max-width:14ch}
+.hero h1 .em{color:var(--signal); position:relative}
+.hero .lede{max-width:60ch; font-size:clamp(16px,1.85vw,20px); color:var(--ink-soft); margin:30px 0 0}
+.hero .lede b{color:var(--ink); font-weight:600}
+.hero .meta{margin-top:26px; font-family:var(--fmono); font-size:12px; color:var(--blue-soft);
+  letter-spacing:.04em; max-width:58ch}
+
+/* the signal trace — signature element */
+.trace{position:relative; margin:30px 0 0; height:70px; border-top:1px dashed var(--faint);
+  border-bottom:1px dashed var(--faint); background:
+    repeating-linear-gradient(90deg, transparent 0 27px, var(--faint-2) 27px 28px);}
+.trace canvas{display:block; width:100%; height:100%}
+.trace .ticks{position:absolute; left:0; bottom:-18px; font-family:var(--fmono); font-size:9.5px;
+  color:var(--blue-soft); letter-spacing:.1em; display:flex; gap:0; width:100%}
+.trace .ticks span{flex:1}
+.trace .label{position:absolute; right:0; top:-9px; font-family:var(--fmono); font-size:10px;
+  letter-spacing:.16em; color:var(--signal); background:var(--paper); padding:0 6px}
+
+.scrollcue{margin-top:40px; font-family:var(--fmono); font-size:11px; letter-spacing:.18em;
+  color:var(--ink-soft); display:flex; align-items:center; gap:10px}
+.scrollcue .bar{width:1px; height:40px; background:linear-gradient(var(--ink),transparent); position:relative; overflow:hidden}
+.scrollcue .bar::after{content:""; position:absolute; top:-40px; left:0; width:1px; height:40px; background:var(--signal); animation:drop 2.2s infinite}
+@keyframes drop{0%{top:-40px}60%,100%{top:40px}}
+
+/* ============================================================
+   CLIENT SWITCH (segmented control, sticky)
+   ============================================================ */
+.switchbar{position:sticky; top:0; z-index:30; padding:10px 0; margin-top:8px;
+  background:linear-gradient(var(--paper) 70%, transparent)}
+.switch{display:flex; flex-wrap:wrap; gap:0; border:1px solid var(--faint);
+  background:rgba(255,255,255,.55); border-radius:3px; overflow:hidden; box-shadow:var(--shadow); width:max-content; max-width:100%}
+.switch button{appearance:none; border:0; background:transparent; cursor:inherit;
+  font-family:var(--fmono); font-size:12px; letter-spacing:.03em; color:var(--ink-soft);
+  padding:11px 16px; border-right:1px solid var(--faint); position:relative; transition:color .2s, background .2s; white-space:nowrap}
+.switch button:last-child{border-right:0}
+.switch button .ind{display:inline-block; width:7px; height:7px; border-radius:50%; background:var(--faint); margin-right:8px; vertical-align:middle; transition:background .2s}
+.switch button:hover{color:var(--ink); background:rgba(255,255,255,.5)}
+.switch button.active{color:var(--ink); background:#fff}
+.switch button.active .ind{background:var(--signal)}
+.switch button.active::after{content:""; position:absolute; left:0; right:0; bottom:0; height:2px; background:var(--signal)}
+
+/* ============================================================
+   SECTION SPACING
+   ============================================================ */
+.block{padding:90px 0}
+.block.tight{padding:64px 0}
+
+/* ============================================================
+   CTI DEMO
+   ============================================================ */
+.cti{display:grid; grid-template-columns:minmax(0,360px) minmax(0,1fr); gap:24px; align-items:stretch}
+
+/* softphone */
+.phone{background:#fff; border:1px solid var(--faint); border-radius:6px; box-shadow:var(--shadow);
+  display:flex; flex-direction:column; overflow:hidden; position:relative}
+.phone-top{display:flex; align-items:center; justify-content:space-between; padding:13px 16px;
+  border-bottom:1px solid var(--faint); font-family:var(--fmono); font-size:11px; letter-spacing:.1em; color:var(--blue-soft)}
+.phone-top .brand{color:var(--ink); font-weight:600; letter-spacing:.04em}
+.phone-state{font-family:var(--fmono); font-size:11px; letter-spacing:.12em; color:var(--ink-soft)}
+.phone-state .d{display:inline-block; width:7px; height:7px; border-radius:50%; background:var(--blue-soft); margin-right:6px; vertical-align:middle}
+.phone[data-state="ringing"] .phone-state .d{background:var(--signal); animation:pulse 1.1s infinite}
+.phone[data-state="live"] .phone-state .d{background:var(--ok)}
+.phone[data-state="wrapup"] .phone-state .d{background:#caa23a}
+
+.phone-body{padding:18px 16px; display:flex; flex-direction:column; gap:14px; flex:1}
+.numline{font-family:var(--fmono); font-size:13px; color:var(--ink-soft); letter-spacing:.04em}
+.numline b{color:var(--ink)}
+.callerwrap{min-height:96px; display:flex; flex-direction:column; gap:6px; justify-content:center;
+  border:1px dashed var(--faint); border-radius:4px; padding:14px; background:var(--paper-2); position:relative; overflow:hidden}
+.caller-empty{font-family:var(--fmono); font-size:12px; color:var(--blue-soft); letter-spacing:.04em}
+.caller-name{font-family:var(--fdisp); font-weight:700; font-size:21px; letter-spacing:-.01em}
+.caller-sub{font-size:13.5px; color:var(--ink-soft)}
+.caller-num{font-family:var(--fmono); font-size:12px; color:var(--blue)}
+.matched{display:inline-flex; align-items:center; gap:7px; font-family:var(--fmono); font-size:10.5px;
+  letter-spacing:.1em; color:var(--ok); text-transform:uppercase; margin-top:2px}
+.matched .dot{width:6px; height:6px; border-radius:50%; background:var(--ok)}
+.pop-in{animation:popin .42s cubic-bezier(.2,.8,.2,1)}
+@keyframes popin{from{opacity:0; transform:translateX(-14px)}to{opacity:1; transform:none}}
+
+/* live waveform */
+.wave{height:54px; border:1px solid var(--faint); border-radius:4px; background:var(--paper-2); overflow:hidden; position:relative}
+.wave canvas{display:block; width:100%; height:100%}
+.wave .timer{position:absolute; right:9px; top:7px; font-family:var(--fmono); font-size:12px;
+  color:var(--ink); letter-spacing:.06em; background:rgba(255,255,255,.7); padding:1px 6px; border-radius:2px}
+
+/* control rows */
+.controls{display:flex; gap:9px; flex-wrap:wrap}
+.btn{appearance:none; border:1px solid var(--faint); background:#fff; color:var(--ink); cursor:inherit;
+  font-family:var(--fmono); font-size:12px; letter-spacing:.06em; padding:11px 14px; border-radius:3px;
+  transition:transform .12s, background .15s, border-color .15s, color .15s; flex:1; min-width:96px}
+.btn:hover{background:var(--paper-2)}
+.btn:active{transform:translateY(1px)}
+.btn:focus-visible{outline:2px solid var(--signal); outline-offset:2px}
+.btn.primary{background:var(--ink); color:#fff; border-color:var(--ink)}
+.btn.primary:hover{background:#16313f}
+.btn.go{background:var(--signal); color:#fff; border-color:var(--signal)}
+.btn.go:hover{background:var(--signal-deep)}
+.btn.warn{color:#fff; background:#b23b2a; border-color:#b23b2a}
+.btn.warn:hover{background:#9c3324}
+.btn.ghost{flex:0 0 auto; min-width:0}
+.btn[disabled]{opacity:.4; pointer-events:none}
+.btn .ico{display:inline-block; margin-right:6px}
+
+.hide{display:none !important}
+
+/* wrap-up form */
+.wrapup{display:flex; flex-direction:column; gap:10px}
+.field label{font-family:var(--fmono); font-size:10.5px; letter-spacing:.12em; text-transform:uppercase; color:var(--blue-soft); display:block; margin-bottom:5px}
+select.in,input.in{width:100%; font-family:var(--fbody); font-size:14px; color:var(--ink);
+  border:1px solid var(--faint); background:#fff; border-radius:3px; padding:9px 10px; cursor:inherit}
+select.in:focus,input.in:focus{outline:2px solid var(--signal); outline-offset:1px}
+
+/* contact record panel (HubSpot-ish) */
+.record{background:#fff; border:1px solid var(--faint); border-radius:6px; box-shadow:var(--shadow); overflow:hidden; display:flex; flex-direction:column}
+.rec-top{display:flex; align-items:center; justify-content:space-between; padding:13px 18px; border-bottom:1px solid var(--faint)}
+.rec-top .crm{font-family:var(--fmono); font-size:11px; letter-spacing:.1em; color:var(--blue-soft)}
+.rec-top .crm b{color:#ea6a2c; font-weight:700}
+.rec-grid{display:grid; grid-template-columns:1fr; gap:0}
+.rec-id{padding:20px 18px 16px; border-bottom:1px solid var(--faint); display:flex; gap:14px; align-items:center}
+.avatar{width:46px; height:46px; border-radius:50%; background:var(--paper); border:1px solid var(--faint);
+  display:flex; align-items:center; justify-content:center; font-family:var(--fdisp); font-weight:700; color:var(--blue); font-size:18px; flex:0 0 auto}
+.rec-id .who{display:flex; flex-direction:column; gap:2px}
+.rec-id .nm{font-family:var(--fdisp); font-weight:700; font-size:19px; letter-spacing:-.01em}
+.rec-id .tt{font-size:13px; color:var(--ink-soft)}
+.props{display:grid; grid-template-columns:1fr 1fr; gap:0; border-bottom:1px solid var(--faint)}
+.prop{padding:13px 18px; border-right:1px solid var(--faint); border-bottom:1px solid var(--faint)}
+.prop:nth-child(2n){border-right:0}
+.prop .pk{font-family:var(--fmono); font-size:10px; letter-spacing:.1em; text-transform:uppercase; color:var(--blue-soft); margin-bottom:4px}
+.prop .pv{font-size:14px; color:var(--ink); font-weight:500}
+.prop .pv.stage{display:inline-flex; align-items:center; gap:7px}
+.prop .pv.stage::before{content:""; width:8px; height:8px; border-radius:50%; background:var(--signal)}
+
+.timeline{padding:16px 18px 20px}
+.timeline h4{margin:0 0 12px; font-family:var(--fmono); font-size:10.5px; letter-spacing:.12em; text-transform:uppercase; color:var(--blue-soft)}
+.tl{list-style:none; margin:0; padding:0; position:relative}
+.tl::before{content:""; position:absolute; left:9px; top:6px; bottom:6px; width:1px; background:var(--faint)}
+.tl li{position:relative; padding:0 0 16px 30px}
+.tl li:last-child{padding-bottom:0}
+.tl li .mk{position:absolute; left:4px; top:3px; width:11px; height:11px; border-radius:50%;
+  background:#fff; border:2px solid var(--blue)}
+.tl li.call .mk{border-color:var(--signal)}
+.tl li.fresh .mk{border-color:var(--ok); box-shadow:0 0 0 4px rgba(46,125,99,.15)}
+.tl .ti{font-size:14px; color:var(--ink); font-weight:500; display:flex; align-items:baseline; gap:8px; flex-wrap:wrap}
+.tl .ti .when{font-family:var(--fmono); font-size:11px; color:var(--blue-soft); font-weight:400; letter-spacing:.03em}
+.tl .td{font-size:13px; color:var(--ink-soft); margin-top:2px}
+.tl .rec-link{font-family:var(--fmono); font-size:11.5px; color:var(--blue); text-decoration:none; border-bottom:1px solid var(--faint)}
+.tl .synced{display:inline-flex; align-items:center; gap:6px; font-family:var(--fmono); font-size:10px; letter-spacing:.08em; color:var(--ok); text-transform:uppercase}
+.tl .synced .dot{width:6px; height:6px; border-radius:50%; background:var(--ok)}
+.tl li.justwrote{animation:writein .55s ease}
+@keyframes writein{from{opacity:0; transform:translateY(-8px)}to{opacity:1; transform:none}}
+
+/* ============================================================
+   CALL FLOW (schematic)
+   ============================================================ */
+.flowwrap{background:#fff; border:1px solid var(--faint); border-radius:6px; box-shadow:var(--shadow); padding:8px}
+.flow-canvas{position:relative; width:100%; overflow:hidden; border-radius:4px;
+  background:
+    linear-gradient(var(--grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid) 1px, transparent 1px), var(--paper-2);
+  background-size:24px 24px,24px 24px, auto;}
+.flow-canvas svg{display:block; width:100%; height:auto}
+.fnode{cursor:inherit}
+.fnode rect{fill:#fff; stroke:var(--ink); stroke-width:1.4; transition:stroke .2s, fill .2s}
+.fnode:hover rect, .fnode.sel rect{stroke:var(--signal); fill:#fff8f3}
+.fnode .nlabel{font-family:var(--fmono); font-size:11px; fill:var(--ink); letter-spacing:.02em}
+.fnode .nnum{font-family:var(--fmono); font-size:10px; fill:var(--blue); letter-spacing:.08em}
+.fnode .nsub{font-family:var(--fmono); font-size:9px; fill:var(--blue-soft)}
+.fnode.sel .nnum{fill:var(--signal)}
+.flow-conn{fill:none; stroke:var(--blue); stroke-width:1.4; stroke-dasharray:5 5; opacity:.85}
+.flow-conn.anim{animation:dash 1.1s linear infinite}
+@keyframes dash{to{stroke-dashoffset:-20}}
+.flow-pulse{fill:var(--signal)}
+.fterm rect{fill:var(--ink); stroke:var(--ink)}
+.fterm .nlabel,.fterm .nnum,.fterm .nsub{fill:#cfe0e8}
+.fterm.sel rect{fill:#16313f; stroke:var(--signal)}
+
+.flow-foot{display:flex; align-items:flex-start; gap:16px; padding:16px 14px 8px; flex-wrap:wrap}
+.nodeconfig{flex:1; min-width:240px; border:1px solid var(--faint); border-radius:4px; background:var(--paper-2); padding:14px 16px}
+.nodeconfig .nc-h{font-family:var(--fmono); font-size:11px; letter-spacing:.1em; text-transform:uppercase; color:var(--signal); margin-bottom:8px; display:flex; align-items:center; gap:8px}
+.nodeconfig .nc-h .num{color:var(--blue)}
+.nodeconfig .nc-name{font-family:var(--fdisp); font-weight:700; font-size:18px; margin-bottom:8px}
+.nodeconfig dl{display:grid; grid-template-columns:auto 1fr; gap:6px 16px; margin:0; font-size:13.5px}
+.nodeconfig dt{font-family:var(--fmono); font-size:11px; color:var(--blue-soft); letter-spacing:.04em}
+.nodeconfig dd{margin:0; color:var(--ink)}
+.legend{font-family:var(--fmono); font-size:11px; color:var(--ink-soft); display:flex; flex-direction:column; gap:7px; padding-top:2px}
+.legend .row{display:flex; align-items:center; gap:8px}
+.legend .sw{width:18px; height:0; border-top-width:2px; border-top-style:dashed}
+.legend .sw.b{border-top-color:var(--blue)}
+.legend .sw.s{border-top-color:var(--signal); border-top-style:solid}
+
+/* ============================================================
+   ON THE WIRE (payload mapper)
+   ============================================================ */
+.wirewrap{border:1px solid var(--faint); border-radius:6px; box-shadow:var(--shadow); overflow:hidden; background:#0e2129}
+.tabs{display:flex; background:#0b1a20; border-bottom:1px solid #1d3946}
+.tabs button{appearance:none; border:0; background:transparent; cursor:inherit;
+  font-family:var(--fmono); font-size:12px; letter-spacing:.04em; color:#7fa0ad; padding:13px 18px;
+  border-right:1px solid #1d3946; position:relative; transition:color .18s, background .18s}
+.tabs button .d{display:inline-block; width:7px; height:7px; border-radius:2px; margin-right:8px; vertical-align:middle}
+.tabs button:nth-child(1) .d{background:#5fb0d6}
+.tabs button:nth-child(2) .d{background:#ea6a2c}
+.tabs button:nth-child(3) .d{background:#6fc59a}
+.tabs button:hover{color:#cfe0e8}
+.tabs button.active{color:#fff; background:#0e2129}
+.tabs button.active::after{content:""; position:absolute; left:0; right:0; bottom:-1px; height:2px; background:var(--signal)}
+.tabs .spacer{flex:1; border-right:0}
+.tabs .filehint{align-self:center; padding-right:16px; font-family:var(--fmono); font-size:10.5px; color:#5f7e8b; letter-spacing:.06em}
+.panel{display:none}
+.panel.active{display:block}
+.code{margin:0; font-family:var(--fmono); font-size:12.5px; line-height:1.75; color:#cfe0e8;
+  padding:20px 22px; overflow-x:auto; white-space:pre; tab-size:2}
+.code .ln{color:#3f5d6a; user-select:none; display:inline-block; width:2.2em; text-align:right; margin-right:1.4em}
+.code .k{color:#8fd0ec}     /* keys     */
+.code .s{color:#e0a878}     /* strings  */
+.code .n{color:#a7e0bf}     /* numbers  */
+.code .c{color:#5f7e8b; font-style:italic}  /* comment */
+.code .m{color:#ea8a52; font-weight:600}    /* method  */
+.code .hl{background:rgba(232,101,31,.13); display:inline-block; border-radius:2px}
+
+/* field map table */
+.maptable{width:100%; border-collapse:collapse; font-size:13px; color:#cfe0e8}
+.maptable th,.maptable td{text-align:left; padding:12px 16px; border-bottom:1px solid #1d3946; vertical-align:top}
+.maptable th{font-family:var(--fmono); font-size:10.5px; letter-spacing:.1em; text-transform:uppercase; color:#7fa0ad; font-weight:500}
+.maptable td.f{font-family:var(--fmono); font-size:12px; color:#8fd0ec; white-space:nowrap}
+.maptable td.t{font-family:var(--fmono); font-size:12px; color:#e0a878; white-space:nowrap}
+.maptable td.note{color:#9fb6c0}
+.maptable tr:last-child td{border-bottom:0}
+.maptable .arrow{color:var(--signal)}
+
+/* ============================================================
+   FIELD NOTES (wall of text, no visual)
+   ============================================================ */
+.notes-block{padding:96px 0}
+.notes-inner{max-width:720px; margin:0 auto}
+.notes-inner .sect-head{margin-left:auto; margin-right:auto; text-align:left}
+.notes-body{column-count:1}
+.notes-body p{font-size:clamp(16px,1.85vw,18.5px); line-height:1.72; color:var(--ink); margin:0 0 22px; max-width:66ch}
+.notes-body p:first-of-type{font-size:clamp(17px,2vw,20px)}
+.notes-body .term{font-family:var(--fmono); font-size:.86em; color:var(--signal-deep); letter-spacing:.01em; background:rgba(232,101,31,.08); padding:1px 5px; border-radius:2px}
+.notes-body b{color:var(--ink); font-weight:600}
+.notes-rule{height:1px; background:var(--faint); margin:0 auto 34px; max-width:720px}
+
+/* ============================================================
+   SHIPPED
+   ============================================================ */
+.stats{display:grid; grid-template-columns:repeat(4,1fr); gap:0; border:1px solid var(--faint);
+  border-radius:6px; overflow:hidden; background:#fff; box-shadow:var(--shadow); margin-bottom:34px}
+.stat{padding:26px 22px; border-right:1px solid var(--faint)}
+.stat:last-child{border-right:0}
+.stat .num{font-family:var(--fdisp); font-weight:800; font-size:clamp(30px,4.6vw,50px); letter-spacing:-.03em; line-height:1; color:var(--ink)}
+.stat .num .u{color:var(--signal); font-size:.5em; margin-left:2px; vertical-align:baseline}
+.stat .lab{font-family:var(--fmono); font-size:11px; letter-spacing:.08em; text-transform:uppercase; color:var(--blue-soft); margin-top:10px}
+
+.clients{display:grid; grid-template-columns:repeat(2,1fr); gap:18px}
+.client{background:#fff; border:1px solid var(--faint); border-radius:6px; box-shadow:var(--shadow); padding:22px 22px 18px; display:flex; flex-direction:column; gap:14px}
+.client-h{display:flex; align-items:flex-start; justify-content:space-between; gap:12px}
+.client-h .nm{font-family:var(--fdisp); font-weight:700; font-size:19px; letter-spacing:-.01em}
+.client-h .seg{font-family:var(--fmono); font-size:10.5px; letter-spacing:.06em; color:var(--blue-soft); margin-top:3px}
+.client-h .reg{font-family:var(--fmono); font-size:10px; letter-spacing:.08em; color:var(--ink-soft); border:1px solid var(--faint); padding:3px 8px; border-radius:2px; white-space:nowrap}
+.client p{margin:0; font-size:14px; color:var(--ink-soft); line-height:1.6}
+.client .kpis{display:flex; gap:18px; flex-wrap:wrap; padding-top:4px; border-top:1px dashed var(--faint)}
+.kpi{display:flex; flex-direction:column}
+.kpi .v{font-family:var(--fdisp); font-weight:700; font-size:19px; letter-spacing:-.01em; color:var(--ink)}
+.kpi .v .u{color:var(--signal); font-size:.6em}
+.kpi .l{font-family:var(--fmono); font-size:9.5px; letter-spacing:.06em; text-transform:uppercase; color:var(--blue-soft); margin-top:3px}
+
+/* ============================================================
+   CTA + FOOTER
+   ============================================================ */
+.cta-block{padding:100px 0 60px}
+.cta-card{border:1px solid var(--ink); border-radius:8px; background:var(--ink); color:#dfeaef;
+  padding:clamp(28px,5vw,56px); position:relative; overflow:hidden}
+.cta-card::before{content:""; position:absolute; inset:0;
+  background-image:linear-gradient(rgba(108,151,168,.08) 1px,transparent 1px),linear-gradient(90deg,rgba(108,151,168,.08) 1px,transparent 1px);
+  background-size:28px 28px,28px 28px; pointer-events:none}
+.cta-card .eyebrow{color:var(--signal)}
+.cta-card .eyebrow::before{background:var(--signal)}
+.cta-card h2{font-family:var(--fdisp); font-weight:800; font-size:clamp(26px,4.2vw,44px); letter-spacing:-.02em; margin:16px 0 14px; max-width:18ch; color:#fff; position:relative}
+.cta-card p{max-width:54ch; color:#aec3cd; font-size:clamp(15px,1.7vw,17px); position:relative; margin:0 0 26px}
+.cta-actions{display:flex; gap:14px; flex-wrap:wrap; position:relative}
+.cta-btn{appearance:none; cursor:inherit; font-family:var(--fmono); font-size:13px; letter-spacing:.06em;
+  padding:14px 22px; border-radius:4px; text-decoration:none; display:inline-flex; align-items:center; gap:10px; transition:transform .12s, background .15s}
+.cta-btn.solid{background:var(--signal); color:#fff; border:1px solid var(--signal)}
+.cta-btn.solid:hover{background:var(--signal-deep)}
+.cta-btn.line{background:transparent; color:#dfeaef; border:1px solid #3a5562}
+.cta-btn.line:hover{background:rgba(255,255,255,.06)}
+.cta-btn:active{transform:translateY(1px)}
+.cta-note{margin-top:22px; font-family:var(--fmono); font-size:11px; color:#7e98a4; letter-spacing:.04em; position:relative}
+
+footer{padding:30px 0 60px; border-top:1px solid var(--faint); margin-top:30px}
+.foot{display:flex; justify-content:space-between; align-items:center; gap:16px; flex-wrap:wrap;
+  font-family:var(--fmono); font-size:11px; color:var(--ink-soft); letter-spacing:.06em}
+.foot a{color:var(--ink); text-decoration:none; border-bottom:1px solid var(--faint)}
+
+/* ============================================================
+   RESPONSIVE
+   ============================================================ */
+@media (max-width:920px){
+  .cti{grid-template-columns:1fr}
+  .clients{grid-template-columns:1fr}
+}
+@media (max-width:720px){
+  .stats{grid-template-columns:1fr 1fr}
+  .stat:nth-child(2){border-right:0}
+  .stat:nth-child(1),.stat:nth-child(2){border-bottom:1px solid var(--faint)}
+  .props{grid-template-columns:1fr}
+  .prop{border-right:0}
+  .tb-mark{grid-template-columns:1fr}
+  .tb-mark .k{display:none}
+  .block{padding:64px 0}
+  .notes-block{padding:64px 0}
+}
+@media (max-width:580px){
+  .stats{grid-template-columns:1fr}
+  .stat{border-right:0; border-bottom:1px solid var(--faint)}
+  .stat:last-child{border-bottom:0}
+  .tabs{overflow-x:auto}
+  .tabs .filehint{display:none}
+  .hero{padding-top:120px}
+  .titleblock .tb-right span:not(.live){display:none}
+  .switch{width:100%; overflow-x:auto}
+  .controls{gap:7px}
+  .btn{min-width:0}
+}
+
+@media (prefers-reduced-motion:reduce){
+  *{animation-duration:.001ms !important; animation-iteration-count:1 !important; transition-duration:.001ms !important; scroll-behavior:auto !important}
+  .reveal{opacity:1; transform:none}
+  .flow-conn.anim{animation:none}
+}
+</style>
+</head>
+
+<body>
+
+<canvas id="scene" aria-hidden="true"></canvas>
+<div id="grain" aria-hidden="true"></div>
+<div class="cursor" aria-hidden="true"></div>
+<div class="cursor-dot" aria-hidden="true"></div>
+
+<!-- TITLE BLOCK -->
+<div class="titleblock" aria-hidden="true">
+  <div class="tb-mark">
+    <span class="k">PROJECT</span><b>ZIWO &rarr; HUBSPOT</b>
+    <span class="k">DISCIPLINE</span><b>VOICE + CRM</b>
+    <span class="k">SHEET</span><b>02 / PORTFOLIO</b>
+  </div>
+  <div class="tb-right"><span class="live"></span><span>4 BUILDS LIVE</span></div>
+</div>
+
+<main>
+
+  <!-- ================= HERO ================= -->
+  <section class="hero" id="top">
+    <div class="wrap">
+      <div class="eyebrow">Ziwo &rarr; HubSpot · CTI · routing · logging</div>
+      <h1>The phone rings.<br>The record <span class="em">opens itself.</span></h1>
+      <p class="lede">A Ziwo and HubSpot integration lives or dies in three spots: matching an inbound number to the right contact, turning a call disposition into something HubSpot reporting can actually read, and grabbing the recording before its signed URL expires. <b>I wire the bridge so a logged call,</b> with disposition, duration, owner, and a recording that still plays in three months, is on the timeline before the rep puts the handset down.</p>
+
+      <div class="trace" aria-hidden="true">
+        <canvas id="heroTrace"></canvas>
+        <div class="label">SIGNAL · IDLE</div>
+        <div class="ticks"><span>00:00</span><span>00:05</span><span>00:10</span><span>00:15</span><span>00:20</span></div>
+      </div>
+
+      <p class="meta">Below: a working softphone, the routing behind it, and the exact payloads on the wire. Four separate builds, switch between them up top.</p>
+
+      <div class="scrollcue"><span class="bar"></span> SCROLL TO TAKE A CALL</div>
+    </div>
+  </section>
+
+  <!-- ================= CLIENT SWITCH ================= -->
+  <div class="switchbar">
+    <div class="wrap">
+      <div class="switch" id="clientSwitch" role="tablist" aria-label="Choose a build">
+        <button class="active" data-client="harbor" role="tab"><span class="ind"></span>Harborline Realty</button>
+        <button data-client="northgate" role="tab"><span class="ind"></span>Northgate Dental</button>
+        <button data-client="loomi" role="tab"><span class="ind"></span>Loomi</button>
+        <button data-client="veer" role="tab"><span class="ind"></span>Veer Freight</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= 01 · CTI DEMO ================= -->
+  <section class="block" id="demo">
+    <div class="wrap">
+      <div class="sect-head reveal">
+        <div class="eyebrow">01 / live</div>
+        <h2>A call, end to end</h2>
+        <p>Hit simulate. Watch the screen pop, take the call, hang up, and see the activity write itself onto the contact. This is the same flow agents run all day, minus the headset.</p>
+      </div>
+
+      <div class="cti reveal">
+
+        <!-- SOFTPHONE -->
+        <div class="phone" id="phone" data-state="idle">
+          <div class="phone-top">
+            <span class="brand">ziwo&nbsp;softphone</span>
+            <span class="phone-state"><span class="d"></span><span id="phoneStateText">READY</span></span>
+          </div>
+          <div class="phone-body">
+            <div class="numline">Line: <b id="lineNum">+971 4 5XX XXXX</b> · <span id="lineQueue">Sales queue</span></div>
+
+            <div class="callerwrap" id="callerwrap">
+              <div class="caller-empty" id="callerEmpty">No active call. Trigger one below.</div>
+              <div id="callerCard" class="hide">
+                <div class="caller-name" id="callerName">—</div>
+                <div class="caller-sub" id="callerSub">—</div>
+                <div class="caller-num" id="callerNum">—</div>
+                <div class="matched"><span class="dot"></span><span id="matchedText">matched to contact</span></div>
+              </div>
+            </div>
+
+            <div class="wave" id="waveBox">
+              <canvas id="liveTrace"></canvas>
+              <div class="timer" id="callTimer">00:00</div>
+            </div>
+
+            <!-- IDLE controls -->
+            <div class="controls" id="ctrlIdle">
+              <button class="btn go" id="btnInbound"><span class="ico">&#9759;</span>Simulate inbound</button>
+              <button class="btn primary" id="btnOutbound"><span class="ico">&#9742;</span>Click-to-call</button>
+            </div>
+
+            <!-- RINGING controls -->
+            <div class="controls hide" id="ctrlRinging">
+              <button class="btn go" id="btnAnswer">Answer</button>
+              <button class="btn warn ghost" id="btnDecline">Decline</button>
+            </div>
+
+            <!-- LIVE controls -->
+            <div class="controls hide" id="ctrlLive">
+              <button class="btn" id="btnMute">Mute</button>
+              <button class="btn" id="btnHold">Hold</button>
+              <button class="btn warn" id="btnHangup">Hang up</button>
+            </div>
+
+            <!-- WRAP-UP -->
+            <div class="wrapup hide" id="ctrlWrap">
+              <div class="field">
+                <label for="dispo">Disposition</label>
+                <select class="in" id="dispo"></select>
+              </div>
+              <div class="field">
+                <label for="note">Note (optional)</label>
+                <input class="in" id="note" type="text" placeholder="One line, written to the call activity" />
+              </div>
+              <button class="btn go" id="btnLog">Log call to HubSpot</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- CONTACT RECORD -->
+        <div class="record" id="record">
+          <div class="rec-top">
+            <span class="crm"><b>HubSpot</b> · contact record</span>
+            <span class="chip"><span class="dot"></span>connected app</span>
+          </div>
+          <div class="rec-grid">
+            <div class="rec-id">
+              <div class="avatar" id="recInitials">AR</div>
+              <div class="who">
+                <div class="nm" id="recName">Aisha Rahman</div>
+                <div class="tt" id="recTitle">Buyer · Dubai Marina</div>
+              </div>
+            </div>
+            <div class="props">
+              <div class="prop"><div class="pk">Lifecycle</div><div class="pv stage" id="recStage">Lead</div></div>
+              <div class="prop"><div class="pk">Owner</div><div class="pv" id="recOwner">Priya Nair</div></div>
+              <div class="prop"><div class="pk">Phone</div><div class="pv" id="recPhone">+971 5X XXX XXXX</div></div>
+              <div class="prop"><div class="pk">Source</div><div class="pv" id="recSource">Paid · Meta</div></div>
+            </div>
+            <div class="timeline">
+              <h4>Activity</h4>
+              <ul class="tl" id="timeline"></ul>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= 02 · CALL FLOW ================= -->
+  <section class="block tight" id="flow">
+    <div class="wrap">
+      <div class="sect-head reveal">
+        <div class="eyebrow">02 / routing</div>
+        <h2>What happens before the agent says hello</h2>
+        <p>The Ziwo side: number, IVR, hours check, queue, overflow, then the write back into HubSpot. Tap a node to see how it's set for <b id="flowClientName">Harborline Realty</b>.</p>
+      </div>
+
+      <div class="flowwrap reveal">
+        <div class="flow-canvas">
+          <svg viewBox="0 0 980 300" id="flowSvg" role="img" aria-label="Call routing diagram">
+            <!-- connectors -->
+            <path class="flow-conn anim" d="M150 90 H236" />
+            <path class="flow-conn anim" d="M386 90 H472" />
+            <path class="flow-conn anim" d="M622 90 H708" />
+            <path class="flow-conn anim" d="M708 116 V196 H622" />
+            <path class="flow-conn anim" d="M472 222 H236" />
+            <path class="flow-conn anim" d="M150 196 V116" />
+            <!-- a travelling pulse -->
+            <circle class="flow-pulse" r="4" cx="150" cy="90">
+              <animateMotion id="pulseMotion" dur="6s" repeatCount="indefinite"
+                path="M150 90 H236 M150 90 H236 H386 H472 H622 H708 V196 H472 H236 V116 H150" />
+            </circle>
+
+            <!-- NODE 01 -->
+            <g class="fnode" data-node="0" transform="translate(36,56)" tabindex="0">
+              <rect x="0" y="0" width="114" height="68" rx="3"></rect>
+              <text class="nnum" x="12" y="20">01</text>
+              <text class="nlabel" x="12" y="40">Inbound DID</text>
+              <text class="nsub" x="12" y="56" id="fn0sub">Ziwo number</text>
+            </g>
+            <!-- NODE 02 -->
+            <g class="fnode" data-node="1" transform="translate(236,56)" tabindex="0">
+              <rect x="0" y="0" width="150" height="68" rx="3"></rect>
+              <text class="nnum" x="12" y="20">02</text>
+              <text class="nlabel" x="12" y="40">IVR greeting</text>
+              <text class="nsub" x="12" y="56" id="fn1sub">EN / AR menu</text>
+            </g>
+            <!-- NODE 03 -->
+            <g class="fnode" data-node="2" transform="translate(472,56)" tabindex="0">
+              <rect x="0" y="0" width="150" height="68" rx="3"></rect>
+              <text class="nnum" x="12" y="20">03</text>
+              <text class="nlabel" x="12" y="40">Hours check</text>
+              <text class="nsub" x="12" y="56" id="fn2sub">Asia/Dubai</text>
+            </g>
+            <!-- NODE 04 -->
+            <g class="fnode" data-node="3" transform="translate(708,56)" tabindex="0">
+              <rect x="0" y="0" width="150" height="68" rx="3"></rect>
+              <text class="nnum" x="12" y="20">04</text>
+              <text class="nlabel" x="12" y="40">Queue + RR</text>
+              <text class="nsub" x="12" y="56" id="fn3sub">9 agents</text>
+            </g>
+            <!-- NODE 05 -->
+            <g class="fnode" data-node="4" transform="translate(472,188)" tabindex="0">
+              <rect x="0" y="0" width="150" height="68" rx="3"></rect>
+              <text class="nnum" x="12" y="20">05</text>
+              <text class="nlabel" x="12" y="40">Screen pop</text>
+              <text class="nsub" x="12" y="56" id="fn4sub">match by phone</text>
+            </g>
+            <!-- NODE 06 (terminal) -->
+            <g class="fnode fterm" data-node="5" transform="translate(36,188)" tabindex="0">
+              <rect x="0" y="0" width="114" height="68" rx="3"></rect>
+              <text class="nnum" x="12" y="20">06</text>
+              <text class="nlabel" x="12" y="40">Log call</text>
+              <text class="nsub" x="12" y="56">to HubSpot</text>
+            </g>
+          </svg>
+        </div>
+
+        <div class="flow-foot">
+          <div class="nodeconfig" id="nodeConfig">
+            <div class="nc-h"><span class="num">01</span> Node config</div>
+            <div class="nc-name" id="ncName">Inbound DID</div>
+            <dl id="ncDl"></dl>
+          </div>
+          <div class="legend">
+            <div class="row"><span class="sw b"></span> control path</div>
+            <div class="row"><span class="sw s"></span> live call</div>
+            <div class="row" style="margin-top:4px; color:var(--blue-soft)">tap any node &uarr;</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= 03 · ON THE WIRE ================= -->
+  <section class="block" id="wire">
+    <div class="wrap">
+      <div class="sect-head reveal">
+        <div class="eyebrow">03 / on the wire</div>
+        <h2>The payloads, not the pitch</h2>
+        <p>Ziwo fires a <code>call.ended</code> event. I normalize it and write a HubSpot call engagement. Here is both, and the map between them.</p>
+      </div>
+
+      <div class="wirewrap reveal">
+        <div class="tabs" role="tablist">
+          <button class="active" data-tab="ziwo" role="tab"><span class="d"></span>ziwo.event.json</button>
+          <button data-tab="hubspot" role="tab"><span class="d"></span>hubspot.call.request</button>
+          <button data-tab="map" role="tab"><span class="d"></span>field map</button>
+          <span class="spacer tabs-spacer"></span>
+          <span class="filehint">webhook &rarr; engagements v3</span>
+        </div>
+
+        <div class="panel active" data-panel="ziwo">
+<pre class="code"><span class="ln">1</span><span class="c">// inbound call just ended — raw webhook from Ziwo</span>
+<span class="ln">2</span>{
+<span class="ln">3</span>  <span class="k">"event"</span>: <span class="s">"call.ended"</span>,
+<span class="ln">4</span>  <span class="k">"callId"</span>: <span class="s">"zw_8f31c2a4"</span>,
+<span class="ln">5</span>  <span class="k">"direction"</span>: <span class="s">"inbound"</span>,
+<span class="ln">6</span>  <span class="k">"from"</span>: <span class="s">"+9715XXXXX842"</span>,
+<span class="ln">7</span>  <span class="k">"to"</span>: <span class="s">"+97145XXXXXX"</span>,
+<span class="ln">8</span>  <span class="k">"queue"</span>: <span class="s">"sales"</span>,
+<span class="ln">9</span>  <span class="k">"agent"</span>: { <span class="k">"ext"</span>: <span class="s">"204"</span>, <span class="k">"name"</span>: <span class="s">"Priya Nair"</span> },
+<span class="ln">10</span>  <span class="k">"startedAt"</span>:  <span class="s">"2026-06-15T09:41:12<span class="hl">+04:00</span>"</span>,
+<span class="ln">11</span>  <span class="k">"answeredAt"</span>: <span class="s">"2026-06-15T09:41:28+04:00"</span>,
+<span class="ln">12</span>  <span class="k">"endedAt"</span>:    <span class="s">"2026-06-15T09:46:03+04:00"</span>,
+<span class="ln">13</span>  <span class="k">"talkTime"</span>: <span class="n">275</span>,                <span class="c">// seconds</span>
+<span class="ln">14</span>  <span class="k">"disposition"</span>: <span class="s">"interested"</span>,
+<span class="ln">15</span>  <span class="k">"recordingUrl"</span>: <span class="s">"https://rec.ziwo.io/zw_8f31c2a4.mp3?<span class="hl">exp=1718440000&sig=…</span>"</span>
+<span class="ln">16</span>}</pre>
+        </div>
+
+        <div class="panel" data-panel="hubspot">
+<pre class="code"><span class="ln">1</span><span class="c">// after normalize() — written to the matched contact</span>
+<span class="ln">2</span><span class="m">POST</span> /crm/v3/objects/calls
+<span class="ln">3</span>{
+<span class="ln">4</span>  <span class="k">"properties"</span>: {
+<span class="ln">5</span>    <span class="k">"hs_timestamp"</span>: <span class="s">"<span class="hl">1718439672000</span>"</span>,        <span class="c">// +04:00 → UTC epoch ms</span>
+<span class="ln">6</span>    <span class="k">"hs_call_direction"</span>: <span class="s">"INBOUND"</span>,
+<span class="ln">7</span>    <span class="k">"hs_call_duration"</span>: <span class="s">"275000"</span>,         <span class="c">// seconds → ms</span>
+<span class="ln">8</span>    <span class="k">"hs_call_status"</span>: <span class="s">"COMPLETED"</span>,
+<span class="ln">9</span>    <span class="k">"hs_call_disposition"</span>: <span class="s">"<span class="hl">b2cf5…-guid</span>"</span>,    <span class="c">// "interested" → GUID via map</span>
+<span class="ln">10</span>    <span class="k">"hs_call_recording_url"</span>: <span class="s">"https://cdn.mads.io/rec/zw_8f31c2a4.mp3"</span>,
+<span class="ln">11</span>    <span class="k">"hubspot_owner_id"</span>: <span class="s">"5512034"</span>,        <span class="c">// ext 204 → owner id</span>
+<span class="ln">12</span>    <span class="k">"hs_call_title"</span>: <span class="s">"Inbound · Sales · interested"</span>
+<span class="ln">13</span>  },
+<span class="ln">14</span>  <span class="k">"associations"</span>: [
+<span class="ln">15</span>    { <span class="k">"to"</span>: { <span class="k">"id"</span>: <span class="s">"<span class="hl">contactId</span>"</span> },
+<span class="ln">16</span>      <span class="k">"types"</span>: [{ <span class="k">"category"</span>: <span class="s">"HUBSPOT_DEFINED"</span>, <span class="k">"typeId"</span>: <span class="n">194</span> }] }
+<span class="ln">17</span>  ]
+<span class="ln">18</span>}</pre>
+        </div>
+
+        <div class="panel" data-panel="map">
+          <table class="maptable">
+            <thead><tr><th>Ziwo field</th><th></th><th>HubSpot property</th><th>The catch</th></tr></thead>
+            <tbody>
+              <tr><td class="f">from</td><td class="arrow">&rarr;</td><td class="t">(match key)</td><td class="note">Normalized to E.164, matched on last 9 digits so a missing country code never blanks the screen.</td></tr>
+              <tr><td class="f">disposition</td><td class="arrow">&rarr;</td><td class="t">hs_call_disposition</td><td class="note">String to GUID through a lookup table. Unknown values fail safe to "Connected" instead of dropping the call.</td></tr>
+              <tr><td class="f">recordingUrl</td><td class="arrow">&rarr;</td><td class="t">hs_call_recording_url</td><td class="note">Signed URL is short-lived. I re-host the file so playback still works in a dispute months later.</td></tr>
+              <tr><td class="f">endedAt</td><td class="arrow">&rarr;</td><td class="t">hs_timestamp</td><td class="note">+04:00 offset converted to UTC epoch ms. Strip it instead of convert and calls log a day off.</td></tr>
+              <tr><td class="f">talkTime</td><td class="arrow">&rarr;</td><td class="t">hs_call_duration</td><td class="note">Seconds to milliseconds.</td></tr>
+              <tr><td class="f">agent.ext</td><td class="arrow">&rarr;</td><td class="t">hubspot_owner_id</td><td class="note">Extension is not an owner id. Mapped in a table, with an alert on the first unmapped extension.</td></tr>
+              <tr><td class="f">callId</td><td class="arrow">&rarr;</td><td class="t">(idempotency key)</td><td class="note">Upsert on callId so a racing answered + ended event can't write the same call twice.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= FIELD NOTES ================= -->
+  <section class="notes-block" id="notes">
+    <div class="wrap">
+      <div class="notes-inner">
+        <div class="sect-head reveal">
+          <div class="eyebrow">field notes</div>
+          <h2>Where these integrations break</h2>
+        </div>
+        <div class="notes-rule reveal"></div>
+        <div class="notes-body reveal">
+          <p>Every one of these breaks in the same handful of places, and none of them show up in a demo. The first is the inbound match. Ziwo hands you a number in one format, HubSpot stores it in another, and a naive exact-string lookup misses about half the time. I normalize both sides to <span class="term">E.164</span>, then match on the last nine digits, so a missing country code or a stray space never sends a known customer to a blank screen.</p>
+
+          <p>Dispositions are the next trap. Ziwo sends a short label like <span class="term">interested</span> or <span class="term">callback</span>. HubSpot wants a disposition GUID, and the moment someone renames a disposition in the portal, a hard-coded value starts silently dropping calls out of reporting. I keep the mapping in one table and <b>fail safe to Connected</b> rather than writing nothing, so a missed map costs you a label, not the whole record.</p>
+
+          <p>Recordings expire. Ziwo's recording links are signed and short-lived, so if you store the URL you got at call time, it returns a 404 the following week and the playback button on the timeline does nothing. I either re-host the file or store the call id and resolve a fresh link on demand, which means the recording still plays when someone needs it during a dispute three months later.</p>
+
+          <p>Timezones cause the bugs nobody can reproduce. Call timestamps arrive with a <span class="term">+04:00</span> offset, HubSpot wants epoch milliseconds, and if a script strips the offset instead of converting it, calls log a day off and managers quietly stop trusting the dashboard. I convert to UTC explicitly and keep the original timestamp alongside it.</p>
+
+          <p>Then there is the quiet one: duplicate contacts. An inbound miss from an unknown number can spawn a junk contact on every ring, and within a month the database is full of single-call ghosts. I only create on answered calls past a few seconds and route the rest to a review list a human can clear in one pass.</p>
+
+          <p>The last one bites when the team grows. A Ziwo extension is not a HubSpot owner id, and when a new agent joins without a mapping, their calls log with no owner and vanish from every rep dashboard. I keep that map somewhere editable and alert on the first unmapped extension, so the failure is a notification you see on day one, not a month of missing pipeline you find in a QBR.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= SHIPPED ================= -->
+  <section class="block" id="shipped">
+    <div class="wrap">
+      <div class="sect-head reveal">
+        <div class="eyebrow">track record</div>
+        <h2>Four lines, four portals, talking</h2>
+        <p>Different industries, same spine: route in Ziwo, match in HubSpot, log on hang up. The numbers below are this month, across all four.</p>
+      </div>
+
+      <div class="stats reveal" id="statRow">
+        <div class="stat"><div class="num"><span class="count" data-target="4" data-dec="0">0</span></div><div class="lab">integrations live</div></div>
+        <div class="stat"><div class="num"><span class="count" data-target="23500" data-dec="0" data-comma="1">0</span></div><div class="lab">calls logged · this mo.</div></div>
+        <div class="stat"><div class="num"><span class="count" data-target="3.1" data-dec="1">0</span><span class="u">s</span></div><div class="lab">median log latency</div></div>
+        <div class="stat"><div class="num"><span class="count" data-target="0" data-dec="0">0</span></div><div class="lab">expired recordings</div></div>
+      </div>
+
+      <div class="clients reveal">
+        <div class="client">
+          <div class="client-h">
+            <div><div class="nm">Harborline Realty</div><div class="seg">Real estate brokerage</div></div>
+            <div class="reg">Dubai</div>
+          </div>
+          <p>Inbound lead line round-robins to nine agents, screen pop on answer, missed calls become tasks, and a call marked interested nudges the deal stage forward.</p>
+          <div class="kpis">
+            <div class="kpi"><div class="v">41<span class="u">s</span></div><div class="l">avg answer</div></div>
+            <div class="kpi"><div class="v">92<span class="u">%</span></div><div class="l">logged &lt; 5s</div></div>
+            <div class="kpi"><div class="v">6,200</div><div class="l">calls / mo</div></div>
+          </div>
+        </div>
+
+        <div class="client">
+          <div class="client-h">
+            <div><div class="nm">Northgate Dental</div><div class="seg">5-clinic group</div></div>
+            <div class="reg">US</div>
+          </div>
+          <p>An IVR books and reschedules before a human picks up. Overflow lands in a callback queue, and every call writes to the contact with the clinic it came from.</p>
+          <div class="kpis">
+            <div class="kpi"><div class="v">38<span class="u">%</span></div><div class="l">self-served</div></div>
+            <div class="kpi"><div class="v">11<span class="u">s</span></div><div class="l">callback SLA</div></div>
+            <div class="kpi"><div class="v">4,800</div><div class="l">calls / mo</div></div>
+          </div>
+        </div>
+
+        <div class="client">
+          <div class="client-h">
+            <div><div class="nm">Loomi</div><div class="seg">D2C e-commerce</div></div>
+            <div class="reg">US</div>
+          </div>
+          <p>Order-status calls resolve in the IVR off a live lookup. What spills to an agent pops the contact with the order attached and logs against it on hang up.</p>
+          <div class="kpis">
+            <div class="kpi"><div class="v">27<span class="u">%</span></div><div class="l">IVR contained</div></div>
+            <div class="kpi"><div class="v">3.2<span class="u">s</span></div><div class="l">log latency</div></div>
+            <div class="kpi"><div class="v">9,100</div><div class="l">calls / mo</div></div>
+          </div>
+        </div>
+
+        <div class="client">
+          <div class="client-h">
+            <div><div class="nm">Veer Freight</div><div class="seg">Logistics dispatch</div></div>
+            <div class="reg">IN</div>
+          </div>
+          <p>Dispatch and customer lines route to a five-person desk, log against the company record, not just the person, and fire a driver callback when a pickup window slips.</p>
+          <div class="kpis">
+            <div class="kpi"><div class="v">2.9<span class="u">s</span></div><div class="l">log latency</div></div>
+            <div class="kpi"><div class="v">100<span class="u">%</span></div><div class="l">miss &rarr; task</div></div>
+            <div class="kpi"><div class="v">3,400</div><div class="l">calls / mo</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= CTA ================= -->
+  <section class="cta-block" id="contact">
+    <div class="wrap">
+      <div class="cta-card reveal">
+        <div class="eyebrow">next</div>
+        <h2>Got a Ziwo line and a HubSpot portal that ignore each other?</h2>
+        <p>I can have click-to-call and logged inbound running on a sandbox in about a week, then move it to production once you've heard a few real calls land where they should. Send me your queue setup and how you want calls tied to records, and I'll come back with a fixed quote.</p>
+        <div class="cta-actions">
+          <a class="cta-btn solid" href="mailto:hello@mahadevautomations.com?subject=Ziwo%20to%20HubSpot%20integration">Start the build &rarr;</a>
+          <a class="cta-btn line" href="#demo">Replay the demo</a>
+        </div>
+        <div class="cta-note">Typical turnaround: sandbox in ~7 days · production after sign-off · fixed quote, not hourly.</div>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <div class="wrap">
+      <div class="foot">
+        <span>Mahadev Automations &amp; Marketing · CRM + telephony</span>
+        <span>Built as a portfolio piece · <a href="#top">back to top</a></span>
+      </div>
+    </div>
+  </footer>
+
+</main>
+
+<!-- ============================================================
+     INTERACTION SCRIPT (non-module)
+     ============================================================ -->
+<script>
+(function(){
+  "use strict";
+  var RM = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var HOVER = window.matchMedia && window.matchMedia('(hover:hover) and (pointer:fine)').matches;
+
+  /* ---------- client data ---------- */
+  var clients = {
+    harbor:{
+      key:'harbor', name:'Harborline Realty', line:'+971 4 5XX XXXX', queue:'Sales queue',
+      contact:{name:'Aisha Rahman', initials:'AR', title:'Buyer · Dubai Marina', stage:'Lead',
+        owner:'Priya Nair', phone:'+971 5X XXX XXXX', source:'Paid · Meta', num:'+971 5X XXX XXXX'},
+      dispos:['Interested','Callback requested','Not interested','Already viewing','Wrong number'],
+      defaultDispo:'Interested',
+      tl:[
+        {cls:'',  ti:'Viewed listing · 2BR Marina Gate', when:'2 days ago', td:'Spent 4m on the floor plan PDF'},
+        {cls:'',  ti:'Form submit · Request a viewing',   when:'2 days ago', td:'Paid · Meta lead form'}
+      ],
+      flow:{ n0:'+971 4 line', n1:'EN / AR menu', n2:'Asia/Dubai', n3:'9 agents', n4:'match by phone',
+        configs:[
+          {name:'Inbound DID', rows:[['number','+971 4 5XX XXXX'],['carrier','Ziwo cloud'],['record','on, dual channel']]},
+          {name:'IVR greeting', rows:[['languages','English, Arabic'],['options','1 Sales · 2 Existing'],['fallback','0 → reception']]},
+          {name:'Hours check', rows:[['timezone','Asia/Dubai'],['open','Sun–Thu 9–7'],['closed','→ voicemail to list']]},
+          {name:'Queue + round robin', rows:[['agents','9 BD reps'],['strategy','round robin, longest idle'],['max wait','45s → overflow VM']]},
+          {name:'Screen pop', rows:[['match','phone, last 9 digits'],['no match','create on answer'],['opens','contact + open deals']]},
+          {name:'Log call', rows:[['object','call engagement'],['on interested','deal stage +1'],['recording','re-hosted, permanent']]}
+        ]}
+    },
+    northgate:{
+      key:'northgate', name:'Northgate Dental', line:'+1 (415) 5XX XXXX', queue:'Reception',
+      contact:{name:'Tom Whitfield', initials:'TW', title:'Patient · Cleaning due', stage:'Patient',
+        owner:'Front desk · Maya', phone:'+1 (415) 2XX XXXX', source:'Recall reminder', num:'+1 (415) 2XX XXXX'},
+      dispos:['Booked','Rescheduled','Callback requested','Billing question','Wrong number'],
+      defaultDispo:'Booked',
+      tl:[
+        {cls:'', ti:'Recall reminder sent', when:'6 days ago', td:'Cleaning due, Riverside clinic'},
+        {cls:'', ti:'Last visit · Hygiene', when:'5 months ago', td:'Next recall set to 6 months'}
+      ],
+      flow:{ n0:'+1 415 line', n1:'Book / reschedule', n2:'America/LA', n3:'6 staff', n4:'match by phone',
+        configs:[
+          {name:'Inbound DID', rows:[['number','+1 (415) 5XX XXXX'],['routing','by clinic, one number'],['record','on']]},
+          {name:'IVR self-service', rows:[['1','Book or reschedule'],['2','Billing'],['3','Reception']]},
+          {name:'Hours check', rows:[['timezone','America/Los_Angeles'],['open','Mon–Sat 8–6'],['closed','→ callback queue']]},
+          {name:'Queue + round robin', rows:[['staff','6 front desk'],['strategy','longest idle'],['max wait','30s → callback']]},
+          {name:'Screen pop', rows:[['match','phone, last 9 digits'],['shows','patient + clinic + recall'],['no match','review list']]},
+          {name:'Log call', rows:[['object','call + ticket'],['on booked','task closed'],['recording','re-hosted']]}
+        ]}
+    },
+    loomi:{
+      key:'loomi', name:'Loomi', line:'+1 (646) 5XX XXXX', queue:'Support',
+      contact:{name:'Renee Park', initials:'RP', title:'Customer · Order LM-20431', stage:'Customer',
+        owner:'Support · Dia', phone:'+1 (646) 7XX XXXX', source:'Order confirmation', num:'+1 (646) 7XX XXXX'},
+      dispos:['Resolved','Refund issued','Escalated','Callback requested','Wrong number'],
+      defaultDispo:'Resolved',
+      tl:[
+        {cls:'', ti:'Order LM-20431 · Shipped', when:'3 days ago', td:'Carrier shows in transit'},
+        {cls:'', ti:'Email · Where is my order', when:'1 day ago', td:'Auto-reply with tracking sent'}
+      ],
+      flow:{ n0:'+1 646 line', n1:'Order lookup', n2:'America/NY', n3:'7 agents', n4:'match + order',
+        configs:[
+          {name:'Inbound DID', rows:[['number','+1 (646) 5XX XXXX'],['record','on'],['hours','24/5']]},
+          {name:'IVR + order lookup', rows:[['1','Order status (live API)'],['2','Returns'],['3','Agent']]},
+          {name:'Hours check', rows:[['timezone','America/New_York'],['open','Mon–Fri 24h'],['closed','→ voicemail + email']]},
+          {name:'Queue + round robin', rows:[['agents','7 support'],['strategy','skills, then idle'],['max wait','60s → VM']]},
+          {name:'Screen pop', rows:[['match','phone, last 9 digits'],['attaches','latest order LM-…'],['no match','create on answer']]},
+          {name:'Log call', rows:[['object','call on contact'],['order prop','set on record'],['recording','re-hosted']]}
+        ]}
+    },
+    veer:{
+      key:'veer', name:'Veer Freight', line:'+91 1XX XXXX XXXX', queue:'Dispatch',
+      contact:{name:'Karan Mehta', initials:'KM', title:'Ops · LOAD-7782', stage:'Account',
+        owner:'Dispatch · Sahil', phone:'+91 9X XXX XXXXX', source:'Booking portal', num:'+91 9X XXX XXXXX'},
+      dispos:['Scheduled','Window changed','Driver dispatched','Callback requested','Wrong number'],
+      defaultDispo:'Scheduled',
+      tl:[
+        {cls:'', ti:'Booking · LOAD-7782 created', when:'1 day ago', td:'Pickup window 14:00–16:00'},
+        {cls:'', ti:'Company · 28 loads this quarter', when:'ongoing', td:'Logged against the account, not the person'}
+      ],
+      flow:{ n0:'+91 line', n1:'Dispatch menu', n2:'Asia/Kolkata', n3:'5 desk', n4:'match company',
+        configs:[
+          {name:'Inbound DID', rows:[['number','+91 1XX XXXX XXXX'],['lines','dispatch + customer'],['record','on']]},
+          {name:'IVR dispatch', rows:[['1','Existing load'],['2','New booking'],['3','Driver']]},
+          {name:'Hours check', rows:[['timezone','Asia/Kolkata'],['open','Mon–Sat 9–9'],['closed','→ on-call mobile']]},
+          {name:'Queue + round robin', rows:[['desk','5 dispatchers'],['strategy','round robin'],['max wait','40s → callback']]},
+          {name:'Screen pop', rows:[['match','phone → company'],['shows','open loads + account'],['no match','review list']]},
+          {name:'Log call', rows:[['object','call on company'],['on window slip','driver callback'],['recording','re-hosted']]}
+        ]}
+    }
+  };
+
+  var current = clients.harbor;
+
+  /* ---------- helpers ---------- */
+  var $ = function(s, r){ return (r||document).querySelector(s); };
+  var $$ = function(s, r){ return Array.prototype.slice.call((r||document).querySelectorAll(s)); };
+  function fmtTime(sec){ var m=Math.floor(sec/60), s=sec%60; return (m<10?'0':'')+m+':'+(s<10?'0':'')+s; }
+
+  /* ============================================================
+     CUSTOM CURSOR
+     ============================================================ */
+  if(HOVER){
+    var cur=$('.cursor'), dot=$('.cursor-dot'), cx=0, cy=0, tx=0, ty=0;
+    document.addEventListener('mousemove', function(e){ tx=e.clientX; ty=e.clientY;
+      dot.style.transform='translate('+tx+'px,'+ty+'px)'; }, {passive:true});
+    (function loop(){ cx+=(tx-cx)*0.18; cy+=(ty-cy)*0.18;
+      cur.style.transform='translate('+cx+'px,'+cy+'px)'; requestAnimationFrame(loop); })();
+    document.addEventListener('mouseover', function(e){
+      if(e.target.closest('button,a,select,input,[tabindex],.fnode')) cur.classList.add('is-hot');
+    });
+    document.addEventListener('mouseout', function(e){
+      if(e.target.closest('button,a,select,input,[tabindex],.fnode')) cur.classList.remove('is-hot');
+    });
+  }
+
+  /* ============================================================
+     REVEAL ON SCROLL + COUNTERS  (single observer)
+     ============================================================ */
+  var io = new IntersectionObserver(function(entries){
+    entries.forEach(function(en){
+      if(!en.isIntersecting) return;
+      en.target.classList.add('in');
+      if(en.target.id==='statRow') runCounters();
+      io.unobserve(en.target);
+    });
+  }, {threshold:0.12});
+  $$('.reveal').forEach(function(el){ io.observe(el); });
+
+  function runCounters(){
+    $$('.count').forEach(function(el){
+      var target=parseFloat(el.getAttribute('data-target'));
+      var dec=parseInt(el.getAttribute('data-dec')||'0',10);
+      var comma=el.getAttribute('data-comma')==='1';
+      if(RM){ el.textContent=render(target); return; }
+      var t0=performance.now(), dur=1200;
+      function tick(now){
+        var p=Math.min(1,(now-t0)/dur);
+        var e=1-Math.pow(1-p,3);
+        el.textContent=render(target*e);
+        if(p<1) requestAnimationFrame(tick);
+        else el.textContent=render(target);
+      }
+      function render(v){
+        var s = dec>0 ? v.toFixed(dec) : String(Math.round(v));
+        if(comma) s = Math.round(v).toLocaleString('en-US');
+        return s;
+      }
+      requestAnimationFrame(tick);
+    });
+  }
+
+  /* ============================================================
+     WAVEFORM ENGINE (hero idle trace + live call trace)
+     ============================================================ */
+  function makeTrace(canvas, opts){
+    var ctx=canvas.getContext('2d'), W=0, H=0, dpr=Math.min(window.devicePixelRatio||1,2);
+    var phase=0, amp=opts.idleAmp, targetAmp=opts.idleAmp, color=opts.color, mode='idle';
+    function size(){ var r=canvas.getBoundingClientRect(); W=r.width; H=r.height;
+      canvas.width=W*dpr; canvas.height=H*dpr; ctx.setTransform(dpr,0,0,dpr,0,0); }
+    size(); window.addEventListener('resize', size);
+    function draw(){
+      ctx.clearRect(0,0,W,H);
+      var mid=H/2;
+      ctx.beginPath();
+      for(var x=0;x<=W;x+=2){
+        var t=x/W;
+        var base=Math.sin((t*opts.freq)+phase);
+        var det = mode==='live' ? (Math.sin(t*42+phase*3)*0.4 + Math.sin(t*17-phase*2)*0.3) : Math.sin(t*9+phase*0.6)*0.25;
+        var y=mid + (base*0.6 + det*0.4)*amp*mid;
+        if(x===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+      }
+      ctx.lineWidth=opts.line||1.4; ctx.strokeStyle=color; ctx.stroke();
+      // baseline ticks for idle
+      if(mode==='idle' && opts.baseline){
+        ctx.beginPath(); ctx.moveTo(0,mid); ctx.lineTo(W,mid);
+        ctx.lineWidth=1; ctx.strokeStyle='rgba(110,151,168,.25)'; ctx.stroke();
+      }
+    }
+    function frame(){
+      amp += (targetAmp-amp)*0.08;
+      phase += mode==='live' ? 0.22 : 0.045;
+      draw();
+      if(!RM) raf=requestAnimationFrame(frame);
+    }
+    var raf;
+    draw();
+    if(!RM) raf=requestAnimationFrame(frame);
+    return {
+      setMode:function(m){ mode=m;
+        targetAmp = m==='live'?opts.liveAmp : m==='ring'?opts.ringAmp : opts.idleAmp;
+        color = m==='idle'?opts.color:opts.colorLive;
+        if(RM){ amp=targetAmp; draw(); } }
+    };
+  }
+
+  var heroTrace = makeTrace($('#heroTrace'), {
+    freq:14, idleAmp:0.12, ringAmp:0.4, liveAmp:0.5,
+    color:'rgba(58,83,95,.55)', colorLive:'rgba(58,83,95,.55)', baseline:true, line:1.3
+  });
+  var liveTrace = makeTrace($('#liveTrace'), {
+    freq:10, idleAmp:0.05, ringAmp:0.55, liveAmp:0.8,
+    color:'rgba(110,151,168,.6)', colorLive:'#E8651F', baseline:true, line:1.6
+  });
+
+  /* ============================================================
+     CTI STATE MACHINE
+     ============================================================ */
+  var phone=$('#phone'), stateText=$('#phoneStateText');
+  var ctrl={ idle:$('#ctrlIdle'), ring:$('#ctrlRinging'), live:$('#ctrlLive'), wrap:$('#ctrlWrap') };
+  var timer=$('#callTimer'), heroLabel=$('.trace .label');
+  var callSeconds=0, callInt=null, ringTO=null, state='idle';
+  var muted=false, held=false;
+
+  function setState(s){
+    state=s;
+    phone.setAttribute('data-state', s==='ringing'?'ringing':s==='live'?'live':s==='wrapup'?'wrapup':'idle');
+    stateText.textContent = ({idle:'READY', ringing:'INCOMING', live:'ON CALL', wrapup:'WRAP-UP'})[s];
+    Object.keys(ctrl).forEach(function(k){ ctrl[k].classList.add('hide'); });
+    ({idle:ctrl.idle, ringing:ctrl.ring, live:ctrl.live, wrapup:ctrl.wrap})[s].classList.remove('hide');
+  }
+
+  function showCaller(direction){
+    $('#callerEmpty').classList.add('hide');
+    var card=$('#callerCard'); card.classList.remove('hide'); card.classList.remove('pop-in'); void card.offsetWidth; card.classList.add('pop-in');
+    $('#callerName').textContent=current.contact.name;
+    $('#callerSub').textContent= direction==='out' ? 'Outbound · '+current.queue : current.contact.title;
+    $('#callerNum').textContent=current.contact.num;
+    $('#matchedText').textContent = direction==='out' ? 'dialing from record' : 'matched to contact';
+  }
+
+  function startInbound(){
+    if(state!=='idle') return;
+    setState('ringing'); showCaller('in');
+    liveTrace.setMode('ring'); heroTrace.setMode('ring');
+    heroLabel.textContent='SIGNAL · RINGING'; heroLabel.style.color='var(--signal)';
+    callSeconds=0; timer.textContent='00:00';
+    if(!RM){ ringTO=setTimeout(function(){ if(state==='ringing') answer(); }, 5200); } // auto-answer if ignored
+  }
+  function startOutbound(){
+    if(state!=='idle') return;
+    setState('live'); showCaller('out'); beginLiveClock();
+    liveTrace.setMode('live'); heroTrace.setMode('live');
+    heroLabel.textContent='SIGNAL · CONNECTED · OUT';
+  }
+  function answer(){
+    if(state!=='ringing') return;
+    clearTimeout(ringTO);
+    setState('live'); beginLiveClock();
+    liveTrace.setMode('live'); heroTrace.setMode('live');
+    heroLabel.textContent='SIGNAL · CONNECTED';
+  }
+  function decline(){
+    clearTimeout(ringTO);
+    resetToIdle();
+  }
+  function beginLiveClock(){
+    muted=false; held=false; $('#btnMute').textContent='Mute'; $('#btnHold').textContent='Hold';
+    if(callInt) clearInterval(callInt);
+    if(!RM){ callInt=setInterval(function(){ callSeconds++; timer.textContent=fmtTime(callSeconds); }, 1000); }
+    else { callSeconds=275; timer.textContent=fmtTime(callSeconds); }
+  }
+  function hangup(){
+    if(callInt) clearInterval(callInt);
+    setState('wrapup');
+    liveTrace.setMode('idle'); heroTrace.setMode('idle');
+    heroLabel.textContent='SIGNAL · WRAP-UP'; heroLabel.style.color='var(--signal)';
+    populateDispo();
+  }
+  function resetToIdle(){
+    if(callInt) clearInterval(callInt);
+    setState('idle');
+    $('#callerCard').classList.add('hide'); $('#callerEmpty').classList.remove('hide');
+    timer.textContent='00:00'; callSeconds=0;
+    liveTrace.setMode('idle'); heroTrace.setMode('idle');
+    heroLabel.textContent='SIGNAL · IDLE'; heroLabel.style.color='var(--signal)';
+  }
+
+  function populateDispo(){
+    var sel=$('#dispo'); sel.innerHTML='';
+    current.dispos.forEach(function(d){
+      var o=document.createElement('option'); o.value=d; o.textContent=d;
+      if(d===current.defaultDispo) o.selected=true; sel.appendChild(o);
+    });
+  }
+
+  function logCall(){
+    var dispo=$('#dispo').value;
+    var note=$('#note').value.trim();
+    var dur=callSeconds||275;
+    var li=document.createElement('li');
+    li.className='call fresh justwrote';
+    li.innerHTML =
+      '<span class="mk"></span>'+
+      '<div class="ti">Call · '+fmtTime(dur).replace(':','m ')+'s · '+dispo+
+        ' <span class="when">just now</span></div>'+
+      '<div class="td">'+(note?escapeHtml(note)+' · ':'')+
+        '<a class="rec-link" href="#" onclick="return false;">recording.mp3</a> · '+
+        'owner '+escapeHtml(current.contact.owner)+'</div>'+
+      '<div class="td"><span class="synced"><span class="dot"></span>synced to HubSpot</span></div>';
+    var tl=$('#timeline'); tl.insertBefore(li, tl.firstChild);
+    // un-fresh older fresh items
+    $$('.tl li.fresh').forEach(function(x){ if(x!==li) x.classList.remove('fresh'); });
+    $('#note').value='';
+    resetToIdle();
+  }
+
+  function escapeHtml(s){ return s.replace(/[&<>"']/g, function(c){
+    return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]; }); }
+
+  /* wire up buttons */
+  $('#btnInbound').addEventListener('click', startInbound);
+  $('#btnOutbound').addEventListener('click', startOutbound);
+  $('#btnAnswer').addEventListener('click', answer);
+  $('#btnDecline').addEventListener('click', decline);
+  $('#btnHangup').addEventListener('click', hangup);
+  $('#btnLog').addEventListener('click', logCall);
+  $('#btnMute').addEventListener('click', function(){ muted=!muted; this.textContent=muted?'Unmute':'Mute'; });
+  $('#btnHold').addEventListener('click', function(){ held=!held; this.textContent=held?'Resume':'Hold';
+    liveTrace.setMode(held?'idle':'live'); });
+
+  /* ============================================================
+     CONTACT RECORD RENDER
+     ============================================================ */
+  function renderRecord(c){
+    $('#recInitials').textContent=c.contact.initials;
+    $('#recName').textContent=c.contact.name;
+    $('#recTitle').textContent=c.contact.title;
+    $('#recStage').textContent=c.contact.stage;
+    $('#recOwner').textContent=c.contact.owner;
+    $('#recPhone').textContent=c.contact.phone;
+    $('#recSource').textContent=c.contact.source;
+    var tl=$('#timeline'); tl.innerHTML='';
+    c.tl.forEach(function(item){
+      var li=document.createElement('li'); li.className=item.cls;
+      li.innerHTML='<span class="mk"></span><div class="ti">'+escapeHtml(item.ti)+
+        ' <span class="when">'+escapeHtml(item.when)+'</span></div>'+
+        (item.td?'<div class="td">'+escapeHtml(item.td)+'</div>':'');
+      tl.appendChild(li);
+    });
+  }
+
+  /* ============================================================
+     CALL FLOW — node config + per-client labels
+     ============================================================ */
+  var flowSel=0;
+  function renderFlowLabels(c){
+    $('#fn0sub').textContent=c.flow.n0; $('#fn1sub').textContent=c.flow.n1;
+    $('#fn2sub').textContent=c.flow.n2; $('#fn3sub').textContent=c.flow.n3;
+    $('#fn4sub').textContent=c.flow.n4;
+    $('#flowClientName').textContent=c.name;
+  }
+  function selectNode(i){
+    flowSel=i;
+    $$('.fnode').forEach(function(n){ n.classList.toggle('sel', parseInt(n.getAttribute('data-node'),10)===i); });
+    var cfg=current.flow.configs[i];
+    $('.nc-h .num').textContent=('0'+(i+1));
+    $('#ncName').textContent=cfg.name;
+    var dl=$('#ncDl'); dl.innerHTML='';
+    cfg.rows.forEach(function(r){
+      var dt=document.createElement('dt'); dt.textContent=r[0];
+      var dd=document.createElement('dd'); dd.textContent=r[1];
+      dl.appendChild(dt); dl.appendChild(dd);
+    });
+  }
+  $$('.fnode').forEach(function(n){
+    n.addEventListener('click', function(){ selectNode(parseInt(n.getAttribute('data-node'),10)); });
+    n.addEventListener('keydown', function(e){ if(e.key==='Enter'||e.key===' '){ e.preventDefault();
+      selectNode(parseInt(n.getAttribute('data-node'),10)); } });
+  });
+
+  /* ============================================================
+     TABS — payload mapper
+     ============================================================ */
+  $$('.tabs button[data-tab]').forEach(function(b){
+    b.addEventListener('click', function(){
+      $$('.tabs button[data-tab]').forEach(function(x){ x.classList.remove('active'); });
+      b.classList.add('active');
+      var t=b.getAttribute('data-tab');
+      $$('.panel').forEach(function(p){ p.classList.toggle('active', p.getAttribute('data-panel')===t); });
+    });
+  });
+
+  /* ============================================================
+     CLIENT SWITCH
+     ============================================================ */
+  $$('#clientSwitch button').forEach(function(b){
+    b.addEventListener('click', function(){
+      $$('#clientSwitch button').forEach(function(x){ x.classList.remove('active'); });
+      b.classList.add('active');
+      current = clients[b.getAttribute('data-client')];
+      // reset any active call to avoid mismatched state
+      resetToIdle();
+      $('#lineNum').textContent=current.line;
+      $('#lineQueue').textContent=current.queue;
+      renderRecord(current);
+      renderFlowLabels(current);
+      selectNode(flowSel);
+    });
+  });
+
+  /* ---------- init ---------- */
+  setState('idle');
+  renderRecord(current);
+  renderFlowLabels(current);
+  selectNode(0);
+})();
+</script>
+
+<!-- ============================================================
+     THREE.JS — Ziwo ↔ HubSpot bridge (nodes + call streams)
+     ============================================================ -->
+<script type="module">
+import * as THREE from 'three';
+
+var RM = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+var canvas = document.getElementById('scene');
+var renderer = new THREE.WebGLRenderer({ canvas:canvas, antialias:true, alpha:true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.8));
+renderer.setSize(window.innerWidth, window.innerHeight);
+
+var scene = new THREE.Scene();
+var camera = new THREE.PerspectiveCamera(42, window.innerWidth/window.innerHeight, 0.1, 100);
+camera.position.set(0, 0, 14);
+
+// palette
+var INK = new THREE.Color('#10242F');
+var BLUE = new THREE.Color('#2C6E8F');
+var SIGNAL = new THREE.Color('#E8651F');
+
+// lights (directional + rim, per brief)
+var dir = new THREE.DirectionalLight(0xffffff, 0.9); dir.position.set(4,6,8); scene.add(dir);
+var rim = new THREE.DirectionalLight(0x9fc3d6, 0.6); rim.position.set(-6,-3,-4); scene.add(rim);
+scene.add(new THREE.AmbientLight(0xdfe9ee, 0.5));
+
+var root = new THREE.Group(); scene.add(root);
+
+/* ---- two hubs: Ziwo (left) + HubSpot (right) ---- */
+function hub(color, pos, r){
+  var g = new THREE.Group();
+  var wire = new THREE.LineSegments(
+    new THREE.EdgesGeometry(new THREE.IcosahedronGeometry(r,1)),
+    new THREE.LineBasicMaterial({ color:color, transparent:true, opacity:0.55 })
+  );
+  g.add(wire);
+  var core = new THREE.Mesh(
+    new THREE.IcosahedronGeometry(r*0.42,0),
+    new THREE.MeshStandardMaterial({ color:color, flatShading:true, roughness:0.6, metalness:0.1,
+      transparent:true, opacity:0.9 })
+  );
+  g.add(core);
+  g.position.copy(pos);
+  g.userData.wire=wire;
+  root.add(g);
+  return g;
+}
+var ziwo  = hub(BLUE,   new THREE.Vector3(-5.4, 0.6, 0), 1.7);
+var hubsp = hub(SIGNAL, new THREE.Vector3( 5.4,-0.4, 0), 1.5);
+
+/* ---- agent satellites around HubSpot ---- */
+var agents=[];
+for(var i=0;i<6;i++){
+  var a = new THREE.Mesh(
+    new THREE.OctahedronGeometry(0.32,0),
+    new THREE.MeshStandardMaterial({ color:INK, flatShading:true, roughness:0.7,
+      transparent:true, opacity:0.85 })
+  );
+  var ang=(i/6)*Math.PI*2;
+  a.userData={ang:ang, rad:2.6+ (i%2)*0.5};
+  root.add(a); agents.push(a);
+}
+
+/* ---- connector line between hubs ---- */
+var connGeo = new THREE.BufferGeometry();
+var connPts = new Float32Array(2*3);
+connGeo.setAttribute('position', new THREE.BufferAttribute(connPts,3));
+var conn = new THREE.Line(connGeo, new THREE.LineBasicMaterial({ color:BLUE, transparent:true, opacity:0.3 }));
+root.add(conn);
+
+/* ---- voice ribbon: sine line between hubs ---- */
+var ribN=60;
+var ribGeo = new THREE.BufferGeometry();
+var ribPts = new Float32Array(ribN*3);
+ribGeo.setAttribute('position', new THREE.BufferAttribute(ribPts,3));
+var ribbon = new THREE.Line(ribGeo, new THREE.LineBasicMaterial({ color:SIGNAL, transparent:true, opacity:0.5 }));
+root.add(ribbon);
+
+/* ---- call particles flowing Ziwo -> HubSpot ---- */
+var PN = 90;
+var pGeo = new THREE.BufferGeometry();
+var pPos = new Float32Array(PN*3);
+var pT = new Float32Array(PN);     // progress 0..1
+var pSpd = new Float32Array(PN);
+var pOff = new Float32Array(PN);    // lateral offset seed
+for(var p=0;p<PN;p++){ pT[p]=Math.random(); pSpd[p]=0.0016+Math.random()*0.0030; pOff[p]=Math.random()*Math.PI*2; }
+pGeo.setAttribute('position', new THREE.BufferAttribute(pPos,3));
+var pMat = new THREE.PointsMaterial({ color:SIGNAL, size:0.12, transparent:true, opacity:0.95,
+  sizeAttenuation:true, depthWrite:false });
+var points = new THREE.Points(pGeo, pMat);
+root.add(points);
+
+/* ---- scroll + mouse state ---- */
+var scrollN=0, targetScroll=0;
+var mx=0, my=0, tmx=0, tmy=0;
+window.addEventListener('scroll', function(){
+  var max=document.body.scrollHeight-window.innerHeight;
+  targetScroll = max>0 ? window.scrollY/max : 0;
+}, {passive:true});
+window.addEventListener('mousemove', function(e){
+  tmx=(e.clientX/window.innerWidth-0.5);
+  tmy=(e.clientY/window.innerHeight-0.5);
+}, {passive:true});
+
+function resize(){
+  camera.aspect=window.innerWidth/window.innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+}
+window.addEventListener('resize', resize);
+
+var t=0;
+function curvePoint(s, out){
+  // arc from ziwo to hubsp, slight upward bow, with lateral wobble seed applied by caller
+  var x = THREE.MathUtils.lerp(ziwo.position.x, hubsp.position.x, s);
+  var y = THREE.MathUtils.lerp(ziwo.position.y, hubsp.position.y, s) + Math.sin(s*Math.PI)*1.6;
+  var z = Math.sin(s*Math.PI)*0.8;
+  out.set(x,y,z);
+}
+var tmpV = new THREE.Vector3();
+
+function frame(){
+  t+=0.01;
+  scrollN += (targetScroll-scrollN)*0.06;
+  mx += (tmx-mx)*0.05; my += (tmy-my)*0.05;
+
+  // camera dolly forward through scroll + parallax
+  camera.position.z = 14 - scrollN*5.5;
+  camera.position.x = mx*2.2;
+  camera.position.y = -my*1.6 + scrollN*0.6;
+  camera.lookAt(0, scrollN*0.4, 0);
+
+  // hubs drift + spread slightly with scroll
+  var spread = 1 + scrollN*0.18;
+  ziwo.position.x  = -5.4*spread;
+  hubsp.position.x =  5.4*spread;
+  ziwo.rotation.y += 0.0026; ziwo.rotation.x = Math.sin(t*0.4)*0.12;
+  hubsp.rotation.y -= 0.0032; hubsp.rotation.x = Math.cos(t*0.5)*0.1;
+  ziwo.position.y = 0.6 + Math.sin(t*0.6)*0.18;
+  hubsp.position.y = -0.4 + Math.cos(t*0.7)*0.16;
+
+  // connector
+  connPts[0]=ziwo.position.x; connPts[1]=ziwo.position.y; connPts[2]=ziwo.position.z;
+  connPts[3]=hubsp.position.x; connPts[4]=hubsp.position.y; connPts[5]=hubsp.position.z;
+  connGeo.attributes.position.needsUpdate=true;
+
+  // voice ribbon
+  for(var r=0;r<ribN;r++){
+    var s=r/(ribN-1);
+    curvePoint(s, tmpV);
+    tmpV.y += Math.sin(s*22 + t*4)*0.18*Math.sin(s*Math.PI);
+    ribPts[r*3]=tmpV.x; ribPts[r*3+1]=tmpV.y; ribPts[r*3+2]=tmpV.z;
+  }
+  ribGeo.attributes.position.needsUpdate=true;
+
+  // agents orbit HubSpot
+  for(var i=0;i<agents.length;i++){
+    var a=agents[i], d=a.userData;
+    var ang=d.ang + t*0.25*(i%2?-1:1);
+    a.position.set(
+      hubsp.position.x + Math.cos(ang)*d.rad,
+      hubsp.position.y + Math.sin(ang)*d.rad*0.6,
+      Math.sin(ang*1.3)*0.8
+    );
+    a.rotation.x+=0.01; a.rotation.y+=0.013;
+  }
+
+  // call particles travel the arc
+  for(var k=0;k<PN;k++){
+    pT[k]+=pSpd[k]; if(pT[k]>1) pT[k]-=1;
+    curvePoint(pT[k], tmpV);
+    var wob=Math.sin(pT[k]*Math.PI);
+    tmpV.x += Math.cos(pOff[k]+t)*0.18*wob;
+    tmpV.y += Math.sin(pOff[k]+t*1.3)*0.18*wob;
+    pPos[k*3]=tmpV.x; pPos[k*3+1]=tmpV.y; pPos[k*3+2]=tmpV.z;
+  }
+  pGeo.attributes.position.needsUpdate=true;
+
+  renderer.render(scene, camera);
+  if(!RM) requestAnimationFrame(frame);
+}
+
+if(RM){ targetScroll=0; scrollN=0; frame(); }   // single static frame
+else { requestAnimationFrame(frame); }
+</script>
+
+</body>
+</html>
